@@ -1,10 +1,9 @@
-// BTC race bot: selective momentum + dip-buy, long only, full-size, quick exits.
+// BTC race bot: selective momentum, long only, full-size, quick exits.
 //
-// Strategy (variant A):
-// - Entry (buy 100% of cash) when EITHER:
-//   (a) momentum: the 20-bar close return is >= MOM_TH and the close is above the
-//       60-bar simple moving average (trend filter keeps us out of a slow bleed), OR
-//   (b) dip-buy: the 60-bar close return is <= -DIP_DROP (a sharp drop, buy the bounce).
+// Strategy (variant B: momentum only):
+// - Entry (buy 100% of cash) when the 20-bar close return is >= MOM_TH and the
+//   close is above the 60-bar simple moving average (trend filter keeps us out of
+//   a slow bleed). The dip-buy leg is disabled (DIP_DROP set so it never fires).
 // - Exit (sell the whole position) when ANY of:
 //   - the close falls TRAIL below the highest close since entry (trailing stop),
 //   - the close reaches TP above the entry close (take-profit locks the gain),
@@ -23,14 +22,14 @@ import { runBars, type BarsState, type Batch, type BuyInput, type SellInput } fr
 
 const SYMBOL = 'CBBTC';
 
-// --- strategy parameters (variant A: momentum + dip-buy) ---
+// --- strategy parameters (variant B: momentum only) ---
 const MOM_LB = 20; // momentum lookback, bars
 const MOM_TH = 0.5; // momentum threshold, percent over MOM_LB bars
 const TREND_N = 60; // trend filter: simple moving average length, bars
 const DIP_LB = 60; // dip lookback, bars
-const DIP_DROP = 1.0; // dip threshold, percent drop over DIP_LB bars
-const TRAIL = 0.4; // trailing stop, percent below the peak since entry
-const TP = 0.8; // take-profit, percent above the entry close
+const DIP_DROP = 999; // dip threshold, percent drop over DIP_LB bars (999 = leg disabled)
+const TRAIL = 0.3; // trailing stop, percent below the peak since entry
+const TP = 0.6; // take-profit, percent above the entry close
 const MAX_HOLD = 120; // max bars to hold a position
 const COOLDOWN = 60; // bars to wait after a sell before the next entry
 const MAX_SLIPPAGE_BPS = 100; // 1% past the close the order was decided on
