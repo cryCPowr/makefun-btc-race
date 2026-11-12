@@ -23,12 +23,12 @@ import { runBars, type BarsState, type Batch, type BuyInput, type SellInput } fr
 const SYMBOL = 'CBBTC';
 
 // --- strategy parameters (variant B: momentum only) ---
-const MOM_LB = 20; // momentum lookback, bars
-const MOM_TH = 0.5; // momentum threshold, percent over MOM_LB bars
+const MOM_LB = 30; // momentum lookback, bars
+const MOM_TH = 0.6; // momentum threshold, percent over MOM_LB bars
 const TREND_N = 60; // trend filter: simple moving average length, bars
 const DIP_LB = 60; // dip lookback, bars
-const DIP_DROP = 999; // dip threshold, percent drop over DIP_LB bars (999 = leg disabled)
-const TRAIL = 0.3; // trailing stop, percent below the peak since entry
+const DIP_DROP = 1.0; // dip threshold, percent drop over DIP_LB bars (999 = leg disabled)
+const TRAIL = 0.4; // trailing stop, percent below the peak since entry
 const TP = 0.6; // take-profit, percent above the entry close
 const MAX_HOLD = 120; // max bars to hold a position
 const COOLDOWN = 60; // bars to wait after a sell before the next entry
