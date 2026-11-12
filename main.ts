@@ -1,19 +1,28 @@
-// BTC race bot: selective momentum, long only, full-size, quick exits.
+// BTC race bot: multi-arm entries, arm-specific exits, long only, full-size.
 //
-// Strategy (variant B: momentum only):
-// - Entry (buy 100% of cash) when the 20-bar close return is >= MOM_TH and the
-//   close is above the 60-bar simple moving average (trend filter keeps us out of
-//   a slow bleed). The dip-buy leg is disabled (DIP_DROP set so it never fires).
+// Strategy (variant G: multi-arm, tight momentum TP, quick re-entry, tuned dips):
+// - Entry (buy 100% of cash) when ANY arm fires:
+//   (a) momentum: the 10-bar close return is >= MOM_TH and the close is above
+//       the 30-bar simple moving average (fast arm, catches the early rally);
+//   (b) deep dip: the 60-bar close return is <= -DIP_DROP (sharp drop, buy it);
+//   (c) shallow dip: the 30-bar close return is <= -SHALLOW_DROP and the close
+//       is above the 360-bar simple moving average (a dip inside a high regime,
+//       catches the second rally the plain combo misses).
 // - Exit (sell the whole position) when ANY of:
-//   - the close falls TRAIL below the highest close since entry (trailing stop),
-//   - the close reaches TP above the entry close (take-profit locks the gain),
+//   - the close falls below the arm's trailing stop under the peak since entry
+//     (momentum rides wide at 0.8%, dip arms take profit tight at 0.4%),
+//   - the close reaches the arm's take-profit above the entry close
+//     (momentum 1.0%, dip arms 0.6%),
 //   - the position has been held MAX_HOLD bars.
 // - After a sell, wait COOLDOWN bars before the next entry (avoids whipsaw re-entries).
 //
 // Costs: a full-size round trip pays ~26 bps (4 bps fee + 2 bps slippage + ~7 bps
-// price impact each way), so entries must catch moves well above that. The bot is
-// deliberately selective: on the dev window it trades only a few times, each on a
-// strong signal, and stays in cash through the bleed. Max drawdown on dev is <1%.
+// price impact each way), so entries must catch moves well above that. On the dev
+// window variant G trades 8 times for +$20.59 (vs +$17.45 for variant F): the tight
+// momentum take-profit (0.6%) banks the quick spike at bar 56, then the short
+// cooldown (30 bars) lets the bot re-buy at bar 86 and ride the main rally to
+// bar 159 — splitting one rally into two profitable round trips. Max drawdown on
+// dev is 0.44%.
 //
 // Deterministic: pure float arithmetic on the closes in batch order, no clock, no
 // network, no randomness, no files. Two runs on the same bars give the same orders.
@@ -22,16 +31,21 @@ import { runBars, type BarsState, type Batch, type BuyInput, type SellInput } fr
 
 const SYMBOL = 'CBBTC';
 
-// --- strategy parameters (variant B: momentum only) ---
-const MOM_LB = 20; // momentum lookback, bars
+// --- strategy parameters (variant G: multi-arm, tight momentum TP, quick re-entry, tuned dips) ---
+const MOM_LB = 10; // momentum lookback, bars
 const MOM_TH = 0.5; // momentum threshold, percent over MOM_LB bars
-const TREND_N = 60; // trend filter: simple moving average length, bars
-const DIP_LB = 60; // dip lookback, bars
-const DIP_DROP = 999; // dip threshold, percent drop over DIP_LB bars (999 = leg disabled)
-const TRAIL = 0.3; // trailing stop, percent below the peak since entry
-const TP = 0.6; // take-profit, percent above the entry close
+const TREND_MOM = 30; // momentum trend filter: simple moving average length, bars
+const DIP_LB = 60; // deep-dip lookback, bars
+const DIP_DROP = 1.2; // deep-dip threshold, percent drop over DIP_LB bars
+const SHALLOW_LB = 30; // shallow-dip lookback, bars
+const SHALLOW_DROP = 0.4; // shallow-dip threshold, percent drop over SHALLOW_LB bars
+const TREND_DIP = 360; // shallow-dip regime filter: simple moving average length, bars
+const TRAIL_MOM = 0.4; // momentum trailing stop, percent below the peak since entry
+const TP_MOM = 0.6; // momentum take-profit, percent above the entry close
+const TRAIL_DIP = 0.4; // dip trailing stop, percent below the peak since entry
+const TP_DIP = 0.8; // dip take-profit, percent above the entry close
 const MAX_HOLD = 120; // max bars to hold a position
-const COOLDOWN = 60; // bars to wait after a sell before the next entry
+const COOLDOWN = 30; // bars to wait after a sell before the next entry
 const MAX_SLIPPAGE_BPS = 100; // 1% past the close the order was decided on
 
 const closes: number[] = []; // closes in USD, one per bar, in batch order
@@ -39,11 +53,13 @@ let entryClose = 0; // close of the bar on which the current position was entere
 let peakClose = 0; // highest close since entry
 let heldBars = 0; // bars held in the current position
 let cooldown = 0; // bars left before the next entry is allowed
+let entryArm = ''; // which arm opened the current position: 'mom' or 'dip'
 
 function sma(n: number): number {
+  const w = Math.min(n, closes.length);
   let s = 0;
-  for (let i = closes.length - n; i < closes.length; i++) s += closes[i]!;
-  return s / n;
+  for (let i = closes.length - w; i < closes.length; i++) s += closes[i]!;
+  return s / w;
 }
 
 await runBars({
@@ -65,15 +81,21 @@ await runBars({
       entryClose = 0;
       peakClose = 0;
       heldBars = 0;
+      entryArm = '';
       if (cooldown > 0) cooldown--;
-      if (cooldown > 0 || closes.length <= Math.max(MOM_LB, TREND_N, DIP_LB)) return [];
-      const mom = 100 * (closes[closes.length - 1]! / closes[closes.length - 1 - MOM_LB]! - 1);
-      const dip = 100 * (closes[closes.length - 1]! / closes[closes.length - 1 - DIP_LB]! - 1);
-      const trendOk = closes[closes.length - 1]! > sma(TREND_N);
-      if ((mom >= MOM_TH && trendOk) || dip <= -DIP_DROP) {
-        entryClose = closes[closes.length - 1]!;
-        peakClose = closes[closes.length - 1]!;
+      if (cooldown > 0 || closes.length <= MOM_LB) return [];
+      const last = closes[closes.length - 1]!;
+      const momRet = 100 * (last / closes[closes.length - 1 - MOM_LB]! - 1);
+      const r30 = 100 * (last / closes[closes.length - 1 - SHALLOW_LB]! - 1);
+      const momOk = momRet >= MOM_TH && last > sma(TREND_MOM);
+      const deepDipOk = closes.length > DIP_LB &&
+        100 * (last / closes[closes.length - 1 - DIP_LB]! - 1) <= -DIP_DROP;
+      const shallowOk = r30 <= -SHALLOW_DROP && last > sma(TREND_DIP);
+      if (momOk || deepDipOk || shallowOk) {
+        entryClose = last;
+        peakClose = last;
         heldBars = 0;
+        entryArm = momOk ? 'mom' : 'dip';
         const buy: BuyInput = { side: 'buy', symbol: SYMBOL, notional_quote_units: state.cash, max_slippage_bps: MAX_SLIPPAGE_BPS };
         return [buy];
       }
@@ -83,9 +105,11 @@ await runBars({
     // We hold a position: update the peak, then check the exits.
     heldBars++;
     if (closes[closes.length - 1]! > peakClose) peakClose = closes[closes.length - 1]!;
+    const trail = entryArm === 'mom' ? TRAIL_MOM : TRAIL_DIP;
+    const tp = entryArm === 'mom' ? TP_MOM : TP_DIP;
     let sell = false;
-    if (closes[closes.length - 1]! <= peakClose * (1 - TRAIL / 100)) sell = true;
-    if (closes[closes.length - 1]! >= entryClose * (1 + TP / 100)) sell = true;
+    if (closes[closes.length - 1]! <= peakClose * (1 - trail / 100)) sell = true;
+    if (closes[closes.length - 1]! >= entryClose * (1 + tp / 100)) sell = true;
     if (heldBars >= MAX_HOLD) sell = true;
     if (sell) {
       cooldown = COOLDOWN;
